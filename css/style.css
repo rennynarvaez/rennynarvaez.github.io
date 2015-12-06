@@ -1,0 +1,88 @@
+Body {
+	background-image:url(../images/batman.jpg);
+	background-repeat: no-repeat;
+	background-size: cover;
+	/*background-color:rgba(255,255,255,0.5);
+	background-color:#55CAED;*/
+	font-family: Gotic, Helvetica, sans-serif;
+	font-family: 'Rubik', sans-serif;
+
+}
+
+
+
+.main {
+	background-color:white;
+	background-color:rgba(255,255,255,0.7);
+	width: 600px;
+	margin: 0 auto;
+	padding:30px;
+	border-radius: 20px;
+	box-shadow: 10px 10px 10px 10px rgba(255,255,255,0.5);
+}
+
+
+
+h1 {
+	text-align:center;
+}
+h2 {
+	text-align:center;
+	text-transform:uppercase;
+	letter-spacing: 10px;
+	font-weight:normal;
+	margin-bottom:10px;
+}
+/*CSS comment */
+
+h3:hover {
+	color:#666666;
+	text-decoration:underline;
+	cursor:pointer;
+}
+
+img{
+	width:200px;
+	margin: 0 auto;
+	display: block;
+	border:5px solid white;
+	border-radius:50% 50 50% 0;
+}
+
+p{ 
+	border:5px solid gray;
+	border-radius:10px;
+	margin: 0 auto 30px;
+	padding:10px 10px 10px 10px;
+	line-height: 1.5;
+}
+
+
+ul,
+ol {
+	line-height: 1.5;
+	list-style: none;
+	padding-left: 0;
+}
+.best {
+	padding-left: 40px;
+	list-style: circle;
+
+}
+
+.best2 {
+	padding-left: 40px;
+	list-style: none;
+
+}
+
+a {
+	color:#cc0099;
+	text-decoration:none;
+	font-weight:bold;
+}
+a:hover {
+	text-decoration: underline;
+	/*transform:rotateZ(180deg);*/
+	display:inline-block;
+	}

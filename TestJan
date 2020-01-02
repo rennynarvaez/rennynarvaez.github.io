@@ -1,0 +1,331 @@
+pragma solidity ^0.5;
+
+import "./Holdable.sol";
+import "./interface/IClearable.sol";
+import "./libraries/SafeMath.sol";
+
+/**
+ * @title Clearable
+ * @notice Clearable provides ERC20-like token contracts with a workflow to submit and process requests to perform transfers
+ * that need to be clearable by the token issuing entity. These transfers are therefore processed in three steps: i) the user
+ * (or someone delegated through an approval) requests the transfer; ii) the token issuer clears the transfer (offchain); and
+ * iii) then the token issuer triggers the execution of the transfer, which moves the tokens from the sender to the receiver.
+ */
+contract Clearable is IClearable, Holdable {
+
+    using SafeMath for uint256;
+
+    mapping (string => address) private _CLEARABLE_TRANSFER_ORDERERS;
+    mapping (string => address) private _CLEARABLE_TRANSFER_FROM_WALLETS;
+    mapping (string => address) private _CLEARABLE_TRANSFER_TO_WALLETS;
+    mapping (string => uint256) private _CLEARABLE_TRANSFER_VALUES;
+    mapping (string => ClearableTransferStatusCode) private _CLEARABLE_TRANSFER_STATUS_CODES;
+    mapping (address => mapping (address => bool)) private _CLEARABLE_TRANSFER_APPROVALS;
+
+    // Modifiers
+
+    modifier clearableTransferExists(string memory operationId) {
+        require(_doesClearableTransferExist(operationId), "ClearableTransfer does not exist");
+        _;
+    }
+
+    modifier clearableTransferDoesNotExist(string memory operationId) {
+        require(!_doesClearableTransferExist(operationId), "ClearableTransfer already exists");
+        _;
+    }
+
+    modifier clearableTransferJustCreated(string memory operationId) {
+        require(_getClearableTransferStatus(operationId) == ClearableTransferStatusCode.Ordered, "ClearableTransfer is already closed");
+        _;
+    }
+
+    modifier clearableTransferNotClosed(string memory operationId) {
+        ClearableTransferStatusCode status = _getClearableTransferStatus(operationId);
+        require(
+            status == ClearableTransferStatusCode.Ordered || status == ClearableTransferStatusCode.InProcess,
+            "ClearableTransfer not in process"
+        );
+        _;
+    }
+
+    // External state-modifying functions
+
+    /**
+     * @notice This function allows wallet owners to approve other addresses to order clearable transfers on their behalf
+     * @dev It is similar to the "approve" method in ERC20, but in this case no allowance is given and this is treated
+     * as a "yes or no" flag
+     * @param orderer The address to be approved as potential orderer of clearable transfers
+     */
+    function authorizeClearableTransferOperator(address orderer) external {
+        requireHasRole(orderer, AGENT_ROLE);
+        address from = msg.sender;
+        _check(_canApproveToOrderClearableTransfer, from, orderer);
+        _approveToRequestClearableTransfer(from, orderer);
+    }
+
+    /**
+     * @notice This function allows wallet owners to revoke clearable transfer ordering privileges from previously approved
+     * addresses
+     * @param orderer The address to be revoked as potential orderer of clearable transfers
+     */
+    function revokeClearableTransferOperator(address orderer) external {
+        address from = msg.sender;
+        _revokeApprovalToRequestClearableTransfer(from, orderer);
+    }
+
+    /**
+     * @notice Method for a wallet owner to order a clearable transfer from the tokenizer on his/her own behalf
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer (together with the address of the sender)
+     * @param to The wallet to which the transfer is directed to
+     * @param value The amount to be transferred
+     */
+    function orderTransfer(
+        string calldata operationId,
+        address to,
+        uint256 value
+    )
+        external
+    {
+        address orderer = msg.sender;
+        address from = msg.sender;
+        _check(_canOrderClearableTransfer, from, to, value);
+        _createClearableTransfer(orderer, operationId, from, to, value);
+    }
+
+    /**
+     * @notice Method to order a clearable transfer on behalf of a (different) wallet owner (analogous to "transferFrom" in
+     * classical ERC20). The orderer needs to be previously approved
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer
+     * @param from The wallet the funds will be transferred from
+     * @param to The wallet to which the transfer is directed to
+     * @param value The amount to be transferred
+     */
+    function orderTransferFrom(
+        string calldata operationId,
+        address from,
+        address to,
+        uint256 value
+    )
+        external
+    {
+        address orderer = msg.sender;
+        requireHasRole(orderer, AGENT_ROLE);
+        require(orderer == from || _isClearableTransferOperatorFor(from, orderer), "Not approved to order clearable transfers");
+        _check(_canOrderClearableTransfer, from, to, value);
+        _createClearableTransfer(orderer, operationId, from, to, value);
+    }
+
+    /**
+     * @notice Function to cancel an outstanding (i.e. not processed) clearable transfer
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer
+     * @dev Only the original orderer can actually cancel an outstanding clerable transfer
+     */
+    function cancelTransfer(string calldata operationId) external
+        clearableTransferExists(operationId)
+        clearableTransferJustCreated(operationId)
+    {
+        address orderer = _getClearableTransferOrderer(operationId);
+        require(msg.sender == orderer, "Sender is not the orderer of the ClearableTransfer");
+        _finalizeHold(operationId, HoldStatusCode.ReleasedByNotary);
+        emit HoldReleased(operationId, HoldStatusCode.ReleasedByNotary);
+        _setClearableTransferStatus(operationId, ClearableTransferStatusCode.Cancelled);
+        emit ClearableTransferCancelled(operationId);
+    }
+
+    /**
+     * @notice Function to be called by the tokenizer administrator to start processing a clearable transfer. It simply
+     * sets the status to "InProcess", which then prevents the orderer from being able to cancel the transfer. This method
+     * can be called by the operator to "lock" the clearable transfer while the internal transfers etc are done by the bank
+     * (offchain). It is not required though to call this method before actually executing or rejecting the request, since
+     * the operator can call the executeClearableTransfer or the rejectClearableTransfer directly, if desired.
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer
+     * @dev Only an operator can do this
+     *
+     */
+    function processClearableTransfer(string calldata operationId) external
+        clearableTransferExists(operationId)
+        clearableTransferJustCreated(operationId)
+    {
+        requireRole(OPERATOR_ROLE);
+        _setClearableTransferStatus(operationId, ClearableTransferStatusCode.InProcess);
+        emit ClearableTransferInProcess(operationId);
+    }
+
+    /**
+     * @notice Function to be called by the tokenizer administrator to honor a clearable transfer. This will execute
+     * the hold and thus transfer the tokens from the payer to the payee
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer
+     * @dev Only operator can do this
+     *
+     */
+    function executeClearableTransfer(string calldata operationId) external
+        clearableTransferExists(operationId)
+        clearableTransferNotClosed(operationId)
+    {
+        requireRole(OPERATOR_ROLE);
+        address from = _getClearableTransferFrom(operationId);
+        address to = _getClearableTransferTo(operationId);
+        uint256 value = _getClearableTransferValue(operationId);
+        _removeFunds(from, value);
+        _addFunds(to, value);
+        _finalizeHold(operationId, HoldStatusCode.ExecutedByNotary);
+        emit HoldExecuted(operationId, HoldStatusCode.ExecutedByNotary);
+        _setClearableTransferStatus(operationId, ClearableTransferStatusCode.Executed);
+        emit ClearableTransferExecuted(operationId);
+    }
+
+    /**
+     * @notice Function to be called by the tokenizer administrator to reject a clearable transfer
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     * the clearable transfer
+     * @param reason A string field to provide a reason for the rejection, should this be necessary
+     * @dev Only operator can do this
+     *
+     */
+    function rejectClearableTransfer(string calldata operationId, string calldata reason) external
+        clearableTransferExists(operationId)
+        clearableTransferNotClosed(operationId)
+    {
+        requireRole(OPERATOR_ROLE);
+        _finalizeHold(operationId, HoldStatusCode.ReleasedByNotary);
+        emit HoldReleased(operationId, HoldStatusCode.ReleasedByNotary);
+        _setClearableTransferStatus(operationId, ClearableTransferStatusCode.Rejected);
+        emit ClearableTransferRejected(operationId, reason);
+    }
+
+    // External view functions
+
+    /**
+     * @notice View method to read existing allowances to payout
+     * @param wallet The address of the wallet from which the funds will be taken
+     * @return Whether the address is approved or not to order clearable transfer on behalf of the wallet owner
+     */
+    function isClearableTransferOperatorFor(address wallet, address orderer) external view returns (bool) {
+        return _isClearableTransferOperatorFor(wallet, orderer);
+    }
+
+    /**
+     * @notice Returns whether the clearable transfer exists
+     * @param operationId The ID of the clearable transfer, which can then be used to index all the information about
+     */
+    function doesClearableTransferExist(string calldata operationId) external view returns (bool) {
+        return _doesClearableTransferExist(operationId);
+    }
+
+    /**
+     * @notice Function to retrieve all the information available for a particular clearable transfer
+     * @param operationId The ID of the clearable transfer
+     * @return orderer: The address of the original submitter of the clearable transfer request
+     * @return from: The address of the wallet from which the funds will be transferred
+     * @return to: The address of the wallet that will receive the funds
+     * @return value: the amount of funds requested
+     * @return status: the current status of the clearable transfer
+     */
+    function retrieveClearableTransferData(
+        string calldata operationId
+    )
+        external view
+        clearableTransferExists(operationId)
+        returns (
+            address orderer,
+            address from,
+            address to,
+            uint256 value,
+            ClearableTransferStatusCode status
+        )
+    {
+        orderer = _getClearableTransferOrderer(operationId);
+        from = _getClearableTransferFrom(operationId);
+        to = _getClearableTransferTo(operationId);
+        value = _getClearableTransferValue(operationId);
+        status = _getClearableTransferStatus(operationId);
+    }
+
+    // Internal functions
+
+    function _createClearableTransfer(
+        address orderer,
+        string memory operationId,
+        address from,
+        address to,
+        uint256 value
+    )
+        internal
+        clearableTransferDoesNotExist(operationId)
+    {
+        require(value.toInt() <= _availableFunds(from), "Not enough funds to request clearable transfer");
+        _createHold(orderer, operationId, from, to, address(0), value, false, 0); // No notary or status, as this is going to be managed by the methods
+        _setClearableTransferOrderer(operationId, orderer);
+        _setClearableTransferFrom(operationId, from);
+        _setClearableTransferTo(operationId, to);
+        _setClearableTransferValue(operationId, value);
+        _setClearableTransferStatus(operationId, ClearableTransferStatusCode.Ordered);
+        emit ClearableTransferOrdered(orderer, operationId, from, to, value);
+    }
+
+    function _doesClearableTransferExist(string memory operationId) internal view returns (bool) {
+        return _getClearableTransferStatus(operationId) != ClearableTransferStatusCode.Nonexistent;
+    }
+
+    // Private functions wrapping access to eternal storage
+    
+    function _getClearableTransferFrom(string memory operationId) private view returns (address from) {
+        from = _CLEARABLE_TRANSFER_FROM_WALLETS[operationId];
+    }
+
+    function _setClearableTransferFrom(string memory operationId, address from) private {
+        _CLEARABLE_TRANSFER_FROM_WALLETS[operationId] = from;
+    }
+
+    function _getClearableTransferOrderer(string memory operationId) private view returns (address orderer) {
+        orderer = _CLEARABLE_TRANSFER_ORDERERS[operationId];
+    }
+
+    function _setClearableTransferOrderer(string memory operationId, address orderer) private {
+        _CLEARABLE_TRANSFER_ORDERERS[operationId] = orderer;
+    }
+
+    function _getClearableTransferTo(string memory operationId) private view returns (address to) {
+        to = _CLEARABLE_TRANSFER_TO_WALLETS[operationId];
+    }
+
+    function _setClearableTransferTo(string memory operationId, address to) private {
+        _CLEARABLE_TRANSFER_TO_WALLETS[operationId] = to;
+    }
+
+    function _getClearableTransferValue(string memory operationId) private view returns (uint256 value) {
+        value = _CLEARABLE_TRANSFER_VALUES[operationId];
+    }
+
+    function _setClearableTransferValue(string memory operationId, uint256 value) private {
+        _CLEARABLE_TRANSFER_VALUES[operationId] = value;
+    }
+
+    function _getClearableTransferStatus(string memory operationId) private view returns (ClearableTransferStatusCode status) {
+        status = _CLEARABLE_TRANSFER_STATUS_CODES[operationId];
+    }
+
+    function _setClearableTransferStatus(string memory operationId, ClearableTransferStatusCode status) private {
+        _CLEARABLE_TRANSFER_STATUS_CODES[operationId] = status;
+    }
+
+    function _approveToRequestClearableTransfer(address wallet, address orderer) private {
+        _CLEARABLE_TRANSFER_APPROVALS[wallet][orderer] = true;
+        emit AuthorizedClearableTransferOperator(wallet, orderer);
+    }
+
+    function _revokeApprovalToRequestClearableTransfer(address wallet, address orderer) private {
+        _CLEARABLE_TRANSFER_APPROVALS[wallet][orderer] = false;
+        emit RevokedClearableTransferOperator(wallet, orderer);
+    }
+
+    function _isClearableTransferOperatorFor(address wallet, address orderer) private view returns (bool) {
+        return _CLEARABLE_TRANSFER_APPROVALS[wallet][orderer];
+    }
+
+}

@@ -1,1 +1,159 @@
-pragma solidity ^0.5;
+---
+title: Home
+slug: home
+weight: 1
+layout: single
+---
+# SmartContracts
+
+This repository contains the smart contracts used for payments, buy/sell orders and fungible token swaps. It is composed of a number of independent truffle repositories:
+
+* **[Registry](./Registry):** a directory of available smart contracts
+* **[EMoneyToken](./EMoneyToken):** an implementation of the EMoneyToken standard
+* **[AccountMirror](./AccountMirror):** a remote control facility for (offchain) bank accounts
+* **[LiquidityBook](./LiquidityBook):** a book to offer and consume liquidity in payment flows
+* **[PaymentsManager](./PaymentsManager):** an orchestrator of international payments
+* **[OrderManager](./OrderManager):** an orchestrator of buy and sell orders
+* **[FungibleTokenSwapManager](./FungibleTokenSwapManager):** an orchestrator of atomic swaps of fungible tokens
+
+Auxiliary repositories used by these main repositories are also provided:
+
+* **[EternalStorage](./EternalStorage):** an eternal storage implementation that allows to separate storage from logic, so migrations are greatly simplified
+
+# Summary of Smart Contract Roles and Permissions
+
+## Registry
+| **Roles** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Owner**<br>This is the Ethereum address that deployed the contract. Only one address can be the owner.|`registerEntity()`<br>`removeEntity()`<br>`grantEntityAdministrationPermissions()`<br>`revokeEntityAdministrationPermissions()`<br>`grantDepartmentOperatorPermissions()`<br>`revokeDepartmentOperatorPermissions()`|
+|**Entity Administrator**<br>This Ethereum address is granted permissions when<br>`registerEntity()` or `grantEntityAdministratorPermissions()` is called. Multiple addresses can have this role. |`grantEntityAdministrationPermissions()`<br>`revokeEntityAdministrationPermissions()`<br>`grantDepartmentOperatorPermissions()`<br>`revokeDepartmentOperatorPermissions()`<br>`registerDepartment()`<br>`removeDepartment()`<br>`registerAddressType()`<br>`removeAddressType()`<br>`registerInstance()`<br>`removeInstance()`<br>`updateInstanceAddress()`|
+|**Department Operator**<br>This Ethereum address is granted permissions when<br>`registerDepartment()` or `grantDepartmentOperatorPermissions()` is called. Multiple addresses can have this role.|`registerAddressType()`<br>`removeAddressType()`<br>`registerInstance()`<br>`removeInstance()`<br>`updateInstanceAddress()`|
+
+## EMoneyToken
+| **Roles / Privileged Addresses** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Owner**<br>This is the Ethereum address that deployed the contract.<br>Only one address can have this role. The deployer of the contract needs to be a registered department operator for the combination of registryAddress, entityId, and departmentId provided to the constructor. This is required because the constructor also registers the EMoneyToken in the Registry.|`addRole()`<br>`revokeRole()`<br>`directWriteBalance()`<br>`directWriteDrawnBalance()`<br>`directAddFunds()`<br>`directRemoveFunds()`|
+|**Operator** (OPERATOR_ROLE)<br>This Ethereum address is granted permissions<br>when `addRole()` is called.<br>Multiple addresses can have this role.|`mint()`<br>`burn()`<br>`processFund()`<br>`cancelFund()`(only while funding request is in ordered state)<br>`executeFund()`<br>`rejectFund()`<br>`orderPayoutFrom()` (from suspense wallet only)<br>`processPayout()`<br>`cancelPayout()`(only while payout in ordered state)<br>`putFundsInSuspenseInPayout()`<br>`executePayout()`<br>`rejectPayout()`<br>`processClearableTransfer()`<br>`cancelTransfer()`(only while clearable transfer is in ordered state)<br>`executeClearableTransfer()`<br>`rejectClearableTransfer()`<br>`releaseHold()`(before and after hold expiry)<br>`executeHold()`(only before hold expiry)|
+|**Credit Risk Officer** (CRO_ROLE)<br>This Ethereum address is granted permissions<br>when `addRole()` is called.<br>Multiple addresses can have this role.|`setUnsecuredOverdraftLimit()`<br>`setInterestEngine()`|
+|**Compliance Officer** (COMPLIANCE_ROLE)<br>This Ethereum address is granted permissions<br>when `addRole()` is called.<br>Multiple addresses can have this role.|`whitelist()`<br>`unWhitelist()`|
+|**Agent** (AGENT_ROLE)<br>This Ethereum address is granted permissions<br>when `addRole()` is called, and additionally requires<br>approval from the individual wallets on behalf of<br>which the agent needs to act. **Whitelisted** wallets<br>can approve agents by calling the `authorizeFundOperator()`,<br>`authorizeClearableTransferOperator()`,<br>`authorizePayoutOperator()`,<br>`authorizeHoldOperator()` functions.<br>Multiple addresses can have this role.|`orderFundFrom()` (only from approved wallets)<br>`orderTransferFrom()` (only from approved wallets)<br>`orderPayoutFrom()` (only from approved wallets)<br>`holdFrom()` (only from approved wallets)|
+|**Whitelisted Ethereum Address**<br>An Ethereum address needs to be whitelisted<br>before it can have a balance and interact with it.<br>Multiple addresses can have this priviledge.|`authorizeFundOperator()`(operator must be an **agent**)<br>`authorizeClearableTransferOperator()`(operator must be an **agent**)<br>`authorizePayoutOperator()`(operator must be an **agent**)<br>`authorizeHoldOperator()`(operator must be an **agent**)<br>`transfer()`(to address must be **whitelisted**)<br>`approve()`(spender address must be **whitelisted**)<br>`increaseApproval()`(spender address must be **whitelisted**)<br>`decreaseApproval()`(spender address must be **whitelisted**)<br>`hold()`(payee address must be **whitelisted**)<br>`orderTransfer()`(to address must be **whitelisted**)<br>`orderFund()`(funding address must be **whitelisted**)<br>`orderPayout()`(payout address must be **whitelisted**)|
+|**notary** address of hold.<br>This Ethereum address is granted permissions<br>when `hold()` or `holdFrom()` is called.<br>Only addresses with the **agent** role can be notaries.<br>Only one address can have this priviledge per hold.|`releaseHold()`(before and after hold expiry)<br>`executeHold()`(only before hold expiry)|
+|**holder** address of hold.<br>This Ethereum address is granted permissions<br>when `hold()` or `holdFrom()` is called.<br>Only one address can have this priviledge per hold.|`releaseHold()`(only after hold expiry)<br>`renewHold()`(only before hold expiry)|
+|**from** address of hold.<br>This Ethereum address is granted permissions<br>when `hold()` or `holdFrom()` is called.<br>Only one address can have this priviledge per hold.|`releaseHold()`(only after hold expiry)|
+|**to** address of hold.<br>This Ethereum address is granted permissions<br>when `hold()` or `holdFrom()` is called.<br>Only one address can have this priviledge per hold.|`releaseHold()`(before and after hold expiry)|
+|**Interest Engine** address of interest engine contract.<br>This Ethereum address is granted permissions<br>when `setInterestEngine()` is called by an<br>address with **Credit Risk Officer** role.<br>Only one address can have this priviledge per wallet.|`chargeInterest()`|
+|**orderer** address of transfer.<br>This Ethereum address is granted permissions<br>when `orderTransfer()` or `orderTransferFrom()` is called.<br>Only one address can have this priviledge per transfer.|`cancelTransfer()`(only while clearable transfer is in ordered state)|
+|**orderer** address of funding request.<br>This Ethereum address is granted permissions<br>when `orderFund()` or `orderFundFrom()` is called.<br>Only one address can have this priviledge per funding request.|`cancelFund()`(only while funding request is in ordered state)|
+|**orderer** address of payout.<br>This Ethereum address is granted permissions<br>when `orderPayout()` or `orderPayoutFrom()` is called.<br>Only one address can have this priviledge per payout.|`cancelPayout()`(only while payout is in ordered state)|
+
+## LiquidityBook
+| **Roles / Privileged Addresses** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Registered Operator**<br>This is the Ethereum address that deployed the contract. Although the LiquidityBook is not Ownable (there are no onlyOwner functions), the deployer of the contract does need to be a registered department operator for the combination of registryAddress, entityId, and departmentId provided to the constructor. This is required because the constructor also registers the LiquidityBook in the Registry. Multiple addresses can be a registered operator for a department.|`setInitialLockTime()`<br>`setWalletInTokenContract()`<br>`setAccountMirror()`<br>`unsetAccountMirror()`<br>`setHeartbeatRate()`<br>`approveBookRunner()`<br>`revokeBookRunner()`<br>`releaseLiquidityLock()`(only while liquidity lock is in initially locked or confirmed states)|
+|**Book Runner**<br>This Ethereum address is granted permissions<br>when `approveBookRunner()` is called by a **Registered Operator** that operates the department under which the Liquidity Book is registered.<br>Multiple addresses can have this role.|`honorCustomQuoteRequest()`<br>`rejectCustomQuoteRequest()`<br>`addQuote()`<br>`modifyQuote()`<br>`removeQuote()`<br>`deleteBook()`<br>`doHeartbeat()`<br>`approveAtomicSwapManager()`<br>`revokeAtomicSwapManager()`|
+|**Atomic Swap Manager**<br>This Ethereum address (typically a contract) is granted permissions<br>when `approveAtomicSwapManager()` is called by a **Book Runner**.<br>Multiple addresses can have this role.|`requestCustomQuote()`<br>`lockLiquidity()`|
+|**atomicSwapManagerKey** of a liquidity lock.<br>This is not an Ethereum address, but rather a registry key that points to an address (typically a registered contract). This address is granted permissions<br>when `lockLiquidity()` is called by an **Atomic Swap Manager**.<br>Only one address can have this priviledge.|`confirmLiquidityLock()`<br>`executeLiquidityLock()`<br>`executeLiquidityLockWithPayout()`<br>`releaseLiquidityLock()`(only while liquidity lock is in initially locked or confirmed states)<br>|
+
+## PaymentsManager
+| **Roles / Privileged Addresses** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Registered Operator**<br>This is the Ethereum address that deployed the contract. Although the PaymentsManager is not Ownable (there are no onlyOwner functions), the deployer of the contract does need to be a registered department operator for the combination of registryAddress, entityId, and departmentId provided to the constructor. This is required because the constructor also registers the PaymentsManager in the Registry. Multiple addresses can be a registered operator for a department.|`setInitialLockTime()`<br>`approveParticipantBank()`<br>`revokeParticipantBank()`<br>`approvePaymentsSubmitter()`<br>`revokePaymentsSubmitter()`<br>`terminatePaymentByOprator()`<br>`cancelPayment()`(only while payment is in LiquidityLocked state)|
+|**Participant Bank**.<br>This is not an Ethereum address, but rather a registry key that points to the address of a registered token contract. The registered token contract is granted permissions when `approveParticipantBank()` is called by a **Registered Operator** of the department that deployed the PaymentsManager. Multiple token contract keys can be approved.|Able to be specified as part of a payment route|
+|**Participant Bank Operator**.<br>This Ethereum address is granted permissions when `approveParticipantBank()` is called. It must have the **Operator** role in the participant bank's token contract. The participant bank refers to a single token contract, but multiple addresses can have the **Operator** role in that contract.|`clearByBank()`(only for non-receiving participant bank in payment route, and while payment is in Submitted state)<br>`rejectByBank()`(only for non-receiving participant bank in payment route, and while payment is in Submitted state)|
+|**Payments Submitter**.<br>This Ethereum address is granted permissions when `approvePaymentsSubmitter()` is called by a **Registered Operator** of the department that deployed the PaymentsManager. Multiple addresses can have this role.|`requestCustomQuote()`<br>`lockLiquidityForPayment()`|
+|**submitter** of a payment.<br>This is the Ethereum address that originally prepared the payment by calling `lockLiquidityForPayment()`. Only one address can have this priviledge.|`submitPayment()`(only if payment is in LiquidityLocked state)<br>`cancelPayment()`(only if payment is in LiquidityLocked state)|
+|**receivingOperator** of a payment.<br>This is the Ethereum address of the receiving bank's token contract operator (where the payment terminates). It must have the **Operator** role in the participant bank's token contract. This address is granted permissions when a payment route is specified. The participant bank refers to a single token contract, but multiple addresses can have the **Operator** role in that contract. Only operators for the one specific receiving bank's token contract has this priviledge.|`acceptPayment()`<br>`rejectPayment()`<br>`setPaymentToForwarded()`<br>`setPaymentToSettled()`<br>`setPaymentToReturned()`|
+
+## OrderManager
+| **Roles / Privileged Addresses** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Registered Operator**<br>This is the Ethereum address that deployed the contract. Although the OrderManager is not Ownable (there are no onlyOwner functions), the deployer of the contract does need to be a registered department operator for the combination of registryAddress, entityId, and departmentId provided to the constructor. This is required because the constructor also registers the OrderManager in the Registry. Multiple addresses can be a registered operator for a department.|`setInitialLockTime()`<br>`approveTokenContract()`<br>`revokeTokenContract()`<br>`approveOrderSubmitter()`<br>`revokeOrderSubmitter()`<br>`cancelOrder()`(only while order is in LiquidityLocked state)|
+|**Approved Token Contract**.<br>This is not an Ethereum address, but rather a registry key that points to the address of a registered token contract. The registered token contract is granted permissions when `approveTokenContract()` is called by a **Registered Operator** of the department that deployed the OrderManager. Multiple token contract keys can be approved.|Able to be specified as part of an order route|
+|**Order Submitter**.<br>This Ethereum address is granted permissions when `approveOrderSubmitter()` is called by a **Registered Operator** of the department that deployed the OrderManager. Multiple addresses can have this role.|`requestCustomQuote()`<br>`lockLiquidityForOrder()`|
+|**submitter** of an order.<br>This is the Ethereum address that originally prepared the order by calling `lockLiquidityForOrder()`. Only one address can have this priviledge.|`submitOrder()`(only if order is in LiquidityLocked state)<br>`cancelOrder()`(only if order is in LiquidityLocked state)|
+|**receivingOperator** of an order.<br>This is the Ethereum address of the terminating token contract operator (where the order terminates). It must have the **Operator** role in the terminating token contract. This address is granted permissions when an order route is specified. The **receivingOperator** refers to a single token contract, but multiple addresses can have the **Operator** role in that contract. Only operators for the one specific token contract has this priviledge.|`acceptOrder()`(Only while the order is in the Submitted state)|
+
+## FungibleTokenSwapManager
+| **Roles / Privileged Addresses** | **Permissions** |
+|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Registered Operator**<br>This is the Ethereum address that deployed the contract. Although the FungibleTokenSwapManager is not Ownable (there are no onlyOwner functions), the deployer of the contract does need to be a registered department operator for the combination of registryAddress, entityId, and departmentId provided to the constructor. This is required because the constructor also registers the FungibleTokenSwapManager in the Registry. Multiple addresses can be a registered operator for a department.|`registerFungibleTokenPair()` (note that the FungibleTokenSwapManager contract must be given the **Operator** role in all token contracts it will be used with)<br>`deregisterFungibleTokenPair()`|
+|**Permissioned Operator**.<br>This can be any Ethereum address that is an operator of the department that was specified to be permissioned to swap a token pair when `registerFungibleTokenPair()` was called. Multiple departments can be permissioned (by calling `registerFungibleTokenPair()` multiple times with different departments), and for each department, multiple addresses can have the department operator role.|`swapFungibleTokens()` (only for the token pair for which this department was granted permission).|
+
+# Setup for local development
+
+execute in the root of the repository
+
+```
+make setup
+```
+
+Install solc (needed for code generation) following next instructions [https://solidity.readthedocs.io/en/v0.5.3/installing-solidity.html](https://solidity.readthedocs.io/en/v0.5.3/installing-solidity.html)
+
+Install abigen (or complete go-ethereum toolset) instructions can be found here [https://github.com/ethereum/go-ethereum/wiki/Building-Ethereum](https://github.com/ethereum/go-ethereum/wiki/Building-Ethereum)
+
+# Generating Go bindings for your smart contracts
+
+Go to the root directory of the smart contract that you want to generate and execute
+
+```
+make generate
+```
+
+The code is generated inside /generated_code/go-adhara-smartcontracts
+
+Alternatively, the command can be run in the root of this project to generate all of the artefacts sequentially.
+
+# Test your smart contracts
+
+Go to the root directory of the smart contract that you want to test
+
+```
+make test
+```
+
+Alternatively, the command will test all of the contracts sequentially if you run this command in the root.
+
+# Including references to other Adhara Smart Contracts
+
+Do not use relative paths when referencing external smart contracts. Use the context / namespace "github.com/AdharaProjects/smart-contracts"
+
+Example: DO NOT include other smart contracts referencing the parent directory
+```
+import "../../EternalStorage/contracts/EternalStorageConnector.sol";
+```
+
+Example: Include smart contracts using the Adhara namespace
+```
+import "github.com/AdharaProjects/smart-contracts/EternalStorage/contracts/EternalStorageConnector.sol";
+```
+
+# Using ganache
+
+Install ```ganache-cli```:
+
+```
+npm install -g ganache-cli
+```
+
+Then run:
+
+```
+ganache-cli -l 9000000000 --allowUnlimitedContractSize -d -a 30
+```
+
+, which runs ganache with a max block size of 9000000000 units of gas, with no limits in smart contract size, and with the deterministic flag which ensures that the 10 accounts originally created will always be the same
+
+Migrations and tests should directly work on ganache if this setup is used
+
+# Using ganache
+
+Fix linting errors.
+
+```bash
+npm run lint-fix
+```
+
+The CI tests on this repo will not pass if there are linting errors.
+
+It is recommended to use a plugin for your editor of choice to lint on save. Look for [`eslint` plugins](https://eslint.org/docs/user-guide/integrations).
